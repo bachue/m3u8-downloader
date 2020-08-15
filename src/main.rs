@@ -1,5 +1,5 @@
 use anyhow::{Error, Result};
-use futures::future::{BoxFuture, FutureExt, TryFutureExt};
+use futures::future::{join_all, BoxFuture, FutureExt, TryFutureExt};
 use m3u8_rs::{
     parse_playlist,
     playlist::{MasterPlaylist, MediaPlaylist, Playlist},
@@ -11,10 +11,12 @@ use std::{
     io::SeekFrom,
     mem::take,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tokio::{
     fs::{create_dir_all, write, File, OpenOptions},
     io::AsyncWriteExt,
+    sync::Semaphore,
 };
 use url::Url;
 
@@ -128,17 +130,34 @@ fn normalize_media_playlist(playlist: &mut MediaPlaylist, original_url: &Url) {
 }
 
 async fn download_ts_and_replace(dir: &Path, playlist: &mut MediaPlaylist) -> Result<()> {
-    for (id, segment) in playlist.segments.iter_mut().enumerate() {
-        let mut file_path = dir.to_path_buf();
-        file_path.push(format!("{}.ts", id));
-        let ts_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&file_path)
-            .await?;
-        download_ts_to(&segment.uri, ts_file).await?;
-        segment.uri = file_path.into_os_string().into_string().unwrap();
+    let semaphore = Arc::new(Semaphore::new(10));
+    let tasks: Vec<_> = playlist
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(id, segment)| {
+            let url = segment.uri.to_owned();
+            let semaphore = semaphore.to_owned();
+            async move {
+                let _permit = semaphore.acquire_owned().await;
+                let mut file_path = dir.to_path_buf();
+                file_path.push(format!("{}.ts", id));
+                let ts_file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&file_path)
+                    .await
+                    .unwrap();
+                download_ts_to(&url, ts_file).await.unwrap();
+                (id, file_path.into_os_string().into_string().unwrap())
+            }
+        })
+        .collect();
+
+    for (id, url) in join_all(tasks).await.into_iter() {
+        playlist.segments.get_mut(id).unwrap().uri = url;
     }
+
     Ok(())
 }
 
@@ -183,8 +202,8 @@ async fn download_ts_to(url: &str, mut file: File) -> Result<()> {
                     println!("Get TS: {}", url);
 
                     if let Some(should_read) = should_read {
-                        if should_read == have_read {
-                            eprintln!("WARNING: HTTP Get Body size doesn't match Content-Length");
+                        if should_read != have_read {
+                            eprintln!("WARNING: HTTP Get Body size doesn't match Content-Length, expected: {}, actual: {}", should_read, have_read);
                         }
                     }
                     return Ok(());
@@ -194,9 +213,6 @@ async fn download_ts_to(url: &str, mut file: File) -> Result<()> {
                     retried += 1;
                 }
             }
-        }
-        if retried >= RETRIES {
-            panic!("Too many times to be failed to get data from {}", url);
         }
     }
 }
