@@ -166,6 +166,8 @@ async fn download_ts_to(url: &str, mut file: File) -> Result<()> {
 
         let mut response =
             response.unwrap_or_else(|| panic!("Too many times to be failed to get {}", url));
+        let should_read = response.content_length();
+        let mut have_read = 0;
 
         let mut retried = 0;
         while retried < RETRIES {
@@ -173,16 +175,23 @@ async fn download_ts_to(url: &str, mut file: File) -> Result<()> {
                 Ok(Some(chunk)) => {
                     file.write_all(&chunk).await?;
                     start += chunk.len() as u64;
+                    have_read += chunk.len() as u64;
                     retried = 0;
                 }
                 Ok(None) => {
                     file.flush().await?;
                     println!("Get TS: {}", url);
+
+                    if let Some(should_read) = should_read {
+                        if should_read == have_read {
+                            eprintln!("WARNING: HTTP Get Body size doesn't match Content-Length");
+                        }
+                    }
                     return Ok(());
                 }
                 Err(err) => {
-                    retried += 1;
                     eprintln!("HTTP Get Body Error ({} / {}): {}", retried, RETRIES, err);
+                    retried += 1;
                 }
             }
         }
