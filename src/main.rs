@@ -12,6 +12,7 @@ use std::{
     mem::take,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     fs::{create_dir_all, write, File, OpenOptions},
@@ -20,7 +21,13 @@ use tokio::{
 };
 use url::Url;
 
-static HTTP_CLIENT: Lazy<Client> = Lazy::new(Client::new);
+static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("Http Client Error")
+});
 
 #[tokio::main]
 async fn main() -> Result<()> {
